@@ -135,22 +135,28 @@ function savePosition()
     State.startX, State.startY = getLocalPos()
 end
 
+-- Fix: ensurePosition harus bener2 konfirmasi posisi sebelum return true
 function ensurePosition()
     for attempt = 1, 10 do
         local curWorld = GetWorldName()
-        local cx, cy = getLocalPos()
+        local cx, cy   = getLocalPos()
         if curWorld == State.startWorld and cx == State.startX and cy == State.startY then
-            sleep(200)
-            return true
+            sleep(500)  -- stabilisasi extra
+            -- Verify sekali lagi setelah sleep
+            cx, cy = getLocalPos()
+            if cx == State.startX and cy == State.startY then
+                return true
+            end
         end
         if not safeWarp(State.startWorld) then
             sleep(1000)
-        elseif safeMove(State.startX, State.startY) then
-            sleep(300)
-            -- verify position again after small delay
-            local vx, vy = getLocalPos()
-            if vx == State.startX and vy == State.startY then
-                return true
+        else
+            if safeMove(State.startX, State.startY) then
+                sleep(500)  -- tunggu player bener2 settle
+                local vx, vy = getLocalPos()
+                if vx == State.startX and vy == State.startY then
+                    return true
+                end
             end
         end
         sleep(1000)
@@ -178,12 +184,20 @@ end
 function pauseFarm()
     if not State.farmingPaused then
         setFarmState(false)
+        sleep(500)  -- tunggu farm bener2 berhenti
     end
 end
 
+-- Fix: resumeFarm hanya boleh dipanggil setelah posisi confirmed
 function resumeFarm()
-    if State.running and not State.retrieveBusy then
-        setFarmState(true)
+    if not State.running or State.retrieveBusy then return end
+    if not Config.onlyRetrieve then
+        -- Pastiin posisi bener dulu sebelum resume
+        local cx, cy = getLocalPos()
+        if cx == State.startX and cy == State.startY and
+           string.lower(GetWorldName()) == string.lower(State.startWorld) then
+            setFarmState(true)
+        end
     end
 end
 
@@ -204,7 +218,10 @@ function checkSeedFull()
     if seedInv >= 200 and Config.gaiaEnabled then
         pauseFarm()
         dropItem(ITEMS.SEED_ID, seedInv, Config.gaiaDropX, Config.gaiaDropY)
-        resumeFarm()
+        -- Balik dulu sebelum resume
+        if ensurePosition() then
+            resumeFarm()
+        end
         sleep(500)
     end
 end
@@ -219,11 +236,13 @@ local dialogData = {
 
 addHook(function(var)
     if var.v1 ~= "OnDialogRequest" or not var.v2 then return false end
-    local txt = var.v2
+    local txt    = var.v2
     local isGaia = txt:find("end_dialog|"..ITEMS.GAIA_DIALOG)
     local isUT   = txt:find("end_dialog|"..ITEMS.UT_DIALOG)
     if not isGaia and not isUT then return false end
-    local cfg = isGaia and {id=ITEMS.GAIA_ID, dialog=ITEMS.GAIA_DIALOG, item_id=ITEMS.SEED_ID} or {id=ITEMS.UT_ID, dialog=ITEMS.UT_DIALOG, item_id=ITEMS.BLOCK_ID}
+    local cfg = isGaia and
+        {id=ITEMS.GAIA_ID, dialog=ITEMS.GAIA_DIALOG, item_id=ITEMS.SEED_ID} or
+        {id=ITEMS.UT_ID,   dialog=ITEMS.UT_DIALOG,   item_id=ITEMS.BLOCK_ID}
     local tilex = txt:match("embed_data|tilex|(%d+)")
     local tiley = txt:match("embed_data|tiley|(%d+)")
     local stock = tonumber(txt:match("contains%s+(%d+)")) or 0
@@ -255,6 +274,7 @@ function retrieveGaia()
     if State.retrieveBusy then return false end
     State.retrieveBusy = true
     pauseFarm()
+
     local found = false
     local tiles = getTiles()
     for _, t in pairs(tiles) do
@@ -274,7 +294,7 @@ function retrieveGaia()
                     local stock = dialogData.stock
                     if stock > 0 then
                         local curInv = invCount(ITEMS.SEED_ID)
-                        local take = math.min(stock, 200 - curInv)
+                        local take   = math.min(stock, 200 - curInv)
                         if take > 0 then
                             local p1 = string.format(
                                 "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
@@ -295,8 +315,16 @@ function retrieveGaia()
             break
         end
     end
+
     State.retrieveBusy = false
-    resumeFarm()
+
+    -- Fix: ensurePosition dulu, baru resumeFarm
+    if ensurePosition() then
+        resumeFarm()
+    else
+        growtopia.notify("Gagal balik posisi, farm tetap pause")
+    end
+
     return found
 end
 
@@ -305,6 +333,7 @@ function retrieveUT()
     if State.retrieveBusy then return false end
     State.retrieveBusy = true
     pauseFarm()
+
     local found = false
     local tiles = getTiles()
     for _, t in pairs(tiles) do
@@ -324,8 +353,8 @@ function retrieveUT()
                     local stock = dialogData.stock
                     if stock > 0 then
                         local curInv = invCount(ITEMS.BLOCK_ID)
-                        local need = 200 - curInv
-                        local take = math.min(stock, need)
+                        local need   = 200 - curInv
+                        local take   = math.min(stock, need)
                         if take > 0 then
                             local p1 = string.format(
                                 "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
@@ -345,8 +374,16 @@ function retrieveUT()
             break
         end
     end
+
     State.retrieveBusy = false
-    resumeFarm()
+
+    -- Fix: ensurePosition dulu, baru resumeFarm
+    if ensurePosition() then
+        resumeFarm()
+    else
+        growtopia.notify("Gagal balik posisi, farm tetap pause")
+    end
+
     return found
 end
 
@@ -355,26 +392,16 @@ function mainLoop()
         if not State.retrieveBusy and not State.farmingPaused then
             checkSeedFull()
             updateBreakCounter()
+
             local blockInv = invCount(ITEMS.BLOCK_ID)
             if Config.utEnabled and blockInv == 0 and not State.retrieveBusy then
-                pauseFarm()
                 retrieveUT()
-                if ensurePosition() then
-                    resumeFarm()
-                else
-                    LogToConsole("Gagal balik posisi, tetap pause farm")
-                end
                 sleep(1000)
             end
+
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
-                pauseFarm()
                 retrieveGaia()
                 State.breakCount = 0
-                if ensurePosition() then
-                    resumeFarm()
-                else
-                    LogToConsole("Gagal balik posisi, tetap pause farm")
-                end
                 sleep(1000)
             end
         end
@@ -384,10 +411,10 @@ end
 
 function startFarm()
     if State.running then return end
-    State.running = true
+    State.running      = true
     State.retrieveBusy = false
-    State.breakCount = 0
-    lastBlockCount = countBlocks()
+    State.breakCount   = 0
+    lastBlockCount     = countBlocks()
     savePosition()
     if not Config.onlyRetrieve then
         setFarmState(true)
@@ -398,7 +425,7 @@ function startFarm()
 end
 
 function stopFarm()
-    State.running = false
+    State.running      = false
     State.retrieveBusy = false
     setFarmState(false)
     growtopia.notify("Auto Farm stopped")
@@ -407,15 +434,15 @@ end
 
 function updateStatus()
     local items = {
-        { State.running and "Running" or "Stopped" },
-        { "Mode: " .. (Config.onlyRetrieve and "Only Retrieve" or "Auto Farm") },
-        { "Break: " .. State.breakCount .. " / " .. Config.breakThreshold },
-        { "Block: " .. invCount(ITEMS.BLOCK_ID) .. " / 200" },
-        { "Seed: " .. invCount(ITEMS.SEED_ID) .. " / 200" },
-        { "GAIA: " .. (Config.gaiaEnabled and "ON" or "OFF") },
-        { "UT: " .. (Config.utEnabled and "ON" or "OFF") },
-        { "Autofarm: " .. (getFarmState() and "ON" or "OFF") },
-        { "Pos: " .. State.startWorld .. " " .. State.startX .. "," .. State.startY }
+        {State.running and "Running" or "Stopped"},
+        {"Mode: "..(Config.onlyRetrieve and "Only Retrieve" or "Auto Farm")},
+        {"Break: "..State.breakCount.." / "..Config.breakThreshold},
+        {"Block: "..invCount(ITEMS.BLOCK_ID).." / 200"},
+        {"Seed: "..invCount(ITEMS.SEED_ID).." / 200"},
+        {"GAIA: "..(Config.gaiaEnabled and "ON" or "OFF")},
+        {"UT: "..(Config.utEnabled and "ON" or "OFF")},
+        {"Autofarm: "..(getFarmState() and "ON" or "OFF")},
+        {"Pos: "..State.startWorld.." "..State.startX..","..State.startY}
     }
     editValue("status_display", json:encode(items))
 end
@@ -463,11 +490,8 @@ addHook(function(type, name, value)
         saved:set("only_retrieve", Config.onlyRetrieve)
         saved:save()
         if State.running then
-            if Config.onlyRetrieve then
-                setFarmState(false)
-            else
-                setFarmState(true)
-            end
+            if Config.onlyRetrieve then setFarmState(false)
+            else setFarmState(true) end
         end
         updateStatus()
     elseif name == "gaia_enable" then
