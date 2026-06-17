@@ -1,4 +1,4 @@
--- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - FINAL
+-- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - FINAL FIX
 local pref = require("preferences")
 local json = require("json")
 local saved = pref:new("auto_farm_controller.json")
@@ -140,12 +140,18 @@ function ensurePosition()
         local curWorld = GetWorldName()
         local cx, cy = getLocalPos()
         if curWorld == State.startWorld and cx == State.startX and cy == State.startY then
+            sleep(200)
             return true
         end
         if not safeWarp(State.startWorld) then
             sleep(1000)
         elseif safeMove(State.startX, State.startY) then
-            return true
+            sleep(300)
+            -- verify position again after small delay
+            local vx, vy = getLocalPos()
+            if vx == State.startX and vy == State.startY then
+                return true
+            end
         end
         sleep(1000)
     end
@@ -353,16 +359,22 @@ function mainLoop()
             if Config.utEnabled and blockInv == 0 and not State.retrieveBusy then
                 pauseFarm()
                 retrieveUT()
-                ensurePosition()
-                resumeFarm()
+                if ensurePosition() then
+                    resumeFarm()
+                else
+                    LogToConsole("Gagal balik posisi, tetap pause farm")
+                end
                 sleep(1000)
             end
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
                 pauseFarm()
                 retrieveGaia()
                 State.breakCount = 0
-                ensurePosition()
-                resumeFarm()
+                if ensurePosition() then
+                    resumeFarm()
+                else
+                    LogToConsole("Gagal balik posisi, tetap pause farm")
+                end
                 sleep(1000)
             end
         end
