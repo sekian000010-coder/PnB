@@ -108,7 +108,6 @@ function findDropTile(baseX, baseY)
         end
     end
     local cx, cy = getLocalPos()
-    LogToConsole("Tidak ada tile kosong, pakai posisi saat ini")
     return cx, cy
 end
 
@@ -312,8 +311,7 @@ function retrieveUT()
                                 dialogData.tilex, dialogData.tiley, take)
                             sendPacket(2, p2)
                             sleep(500)
-                            dropItem(ITEMS.BLOCK_ID, take, Config.utDropX, Config.utDropY)
-                            LogToConsole(string.format("Retrieve UT %d block", take))
+                            LogToConsole(string.format("Retrieve UT %d block ke inventory", take))
                         end
                     end
                 end
@@ -342,20 +340,12 @@ function updateBreakCounter()
     end
 end
 
-function checkAndDropFullInventory()
+function checkSeedFull()
     local seedInv = invCount(ITEMS.SEED_ID)
-    local blockInv = invCount(ITEMS.BLOCK_ID)
-    if seedInv >= 200 then
+    if seedInv >= 200 and Config.gaiaEnabled then
         LogToConsole("Seed inventory full, drop " .. seedInv)
         pauseFarm()
         dropItem(ITEMS.SEED_ID, seedInv, Config.gaiaDropX, Config.gaiaDropY)
-        resumeFarm()
-        sleep(500)
-    end
-    if blockInv >= 200 then
-        LogToConsole("Block inventory full, drop " .. blockInv)
-        pauseFarm()
-        dropItem(ITEMS.BLOCK_ID, blockInv, Config.utDropX, Config.utDropY)
         resumeFarm()
         sleep(500)
     end
@@ -364,7 +354,7 @@ end
 function mainLoop()
     while State.running do
         if not State.retrieveBusy and not State.farmingPaused then
-            checkAndDropFullInventory()
+            checkSeedFull()
             updateBreakCounter()
             local blockInv = invCount(ITEMS.BLOCK_ID)
             if Config.utEnabled and blockInv == 0 and not State.retrieveBusy then
