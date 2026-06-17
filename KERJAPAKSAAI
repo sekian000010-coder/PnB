@@ -311,7 +311,7 @@ function retrieveUT()
                                 dialogData.tilex, dialogData.tiley, take)
                             sendPacket(2, p2)
                             sleep(500)
-                            LogToConsole(string.format("Retrieve UT %d block ke inventory", take))
+                            LogToConsole(string.format("Retrieve UT %d block", take))
                         end
                     end
                 end
@@ -332,7 +332,9 @@ function updateBreakCounter()
     if not State.running or State.retrieveBusy then return end
     local current = invCount(ITEMS.SEED_ID)
     if current > State.lastSeedInv then
-        State.breakCount = State.breakCount + (current - State.lastSeedInv)
+        local added = current - State.lastSeedInv
+        State.breakCount = State.breakCount + added
+        LogToConsole(string.format("Break counter +%d = %d", added, State.breakCount))
         State.lastSeedInv = current
         updateStatus()
     elseif current < State.lastSeedInv then
