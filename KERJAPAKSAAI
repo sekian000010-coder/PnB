@@ -1,21 +1,11 @@
 -- =============================================================
 -- AUTO FARM CONTROLLER (LGRID + GAIA + UT)
 -- =============================================================
--- Fitur:
---   - Control auto farm bawaan LGRID
---   - Break counter dari tile change
---   - Retrieve GAIA saat threshold tercapai
---   - Retrieve UT saat block inventory kosong
---   - Position lock (save/restore)
---   - Only Retrieve mode untuk testing
---   - Anti crash: retrieveBusy, farmingPaused, running
--- =============================================================
 
 local pref = require("preferences")
 local json = require("json")
 local saved = pref:new("auto_farm_controller.json")
 
--- ================ CONFIG ================
 local Config = {
     breakThreshold  = tonumber(saved:get("break_threshold", 500)),
     gaiaEnabled     = saved:get("gaia_enabled", true),
@@ -27,7 +17,6 @@ local Config = {
     onlyRetrieve    = saved:get("only_retrieve", false),
 }
 
--- ================ STATE ================
 local State = {
     running         = false,
     retrieveBusy    = false,
@@ -38,20 +27,17 @@ local State = {
     startY          = 0,
 }
 
--- ID item
 local ITEMS = {
     GAIA_ID     = 6946,
     UT_ID       = 6948,
-    BLOCK_ID    = 5666,  -- Laser Grid
-    SEED_ID     = 5667,  -- Laser Grid Seed
+    BLOCK_ID    = 5666,
+    SEED_ID     = 5667,
     GAIA_DIALOG = "itemsucker_seed",
     UT_DIALOG   = "itemsucker_block",
 }
 
--- Alias autofarm bawaan (dari hasil test sebelumnya)
 local AUTOFARM_ALIAS = "autofarm_start"
 
--- ================ UTILITY ================
 function getLocalPos()
     local p = getLocal()
     if not p then return 0, 0 end
@@ -65,20 +51,10 @@ function invCount(itemID)
     return 0
 end
 
-function getItemIdByName(name)
-    if not name then return nil end
-    local ok, id = pcall(findItemID, name)
-    if ok and id and id > 0 then return id end
-    local ok2, info = pcall(getItemInfoByName, name)
-    if ok2 and info and info.id then return info.id end
-    return nil
-end
-
 function safeWarp(worldStr)
     local w, d = worldStr:match("([^|]+)|?(.*)")
     if d == "" or d == nil then d = "0" end
     if string.lower(GetWorldName()) == string.lower(w) then return true end
-    
     for attempt = 1, 3 do
         LogToConsole(string.format("🔄 Warp ke %s (attempt %d)", w, attempt))
         sendPacket(3, "action|join_request\nname|"..w.."|"..d.."\ninvitedWorld|0")
@@ -151,7 +127,6 @@ function dropItem(itemID, amount, baseX, baseY)
     LogToConsole(string.format("✅ Drop %d item di (%d,%d)", amount, dx, dy))
 end
 
--- ================ POSITION LOCK ================
 function savePosition()
     State.startWorld = GetWorldName()
     State.startX, State.startY = getLocalPos()
@@ -176,7 +151,6 @@ function ensurePosition()
     return false
 end
 
--- ================ AUTOFARM CONTROL ================
 function getFarmState()
     return getValue(0, AUTOFARM_ALIAS)
 end
@@ -208,7 +182,6 @@ function resumeFarm()
     end
 end
 
--- ================ RETRIEVE ================
 local dialogData = {
     stock = 0,
     tilex = 0,
@@ -220,16 +193,13 @@ local dialogData = {
 addHook(function(var)
     if var.v1 ~= "OnDialogRequest" or not var.v2 then return false end
     local txt = var.v2
-    
     local isGaia = txt:find("end_dialog|"..ITEMS.GAIA_DIALOG)
     local isUT   = txt:find("end_dialog|"..ITEMS.UT_DIALOG)
     if not isGaia and not isUT then return false end
-    
     local cfg = isGaia and {id=ITEMS.GAIA_ID, dialog=ITEMS.GAIA_DIALOG, item_id=ITEMS.SEED_ID} or {id=ITEMS.UT_ID, dialog=ITEMS.UT_DIALOG, item_id=ITEMS.BLOCK_ID}
     local tilex = txt:match("embed_data|tilex|(%d+)")
     local tiley = txt:match("embed_data|tiley|(%d+)")
     local stock = tonumber(txt:match("contains (%d+)")) or 0
-    
     if tilex and tiley then
         dialogData.stock = stock
         dialogData.tilex = tonumber(tilex)
@@ -257,10 +227,8 @@ function retrieveGaia()
     if not Config.gaiaEnabled then return false end
     if State.retrieveBusy then return false end
     State.retrieveBusy = true
-    
     LogToConsole("🌱 Retrieve GAIA dimulai")
     pauseFarm()
-    
     local found = false
     local tiles = getTiles()
     for _, t in pairs(tiles) do
@@ -301,11 +269,9 @@ function retrieveGaia()
             break
         end
     end
-    
     if not found then
         LogToConsole("⚠️ GAIA tidak ditemukan")
     end
-    
     State.retrieveBusy = false
     resumeFarm()
     return found
@@ -315,10 +281,8 @@ function retrieveUT()
     if not Config.utEnabled then return false end
     if State.retrieveBusy then return false end
     State.retrieveBusy = true
-    
     LogToConsole("🧱 Retrieve UT dimulai")
     pauseFarm()
-    
     local found = false
     local tiles = getTiles()
     for _, t in pairs(tiles) do
@@ -360,32 +324,14 @@ function retrieveUT()
             break
         end
     end
-    
     if not found then
         LogToConsole("⚠️ UT tidak ditemukan")
     end
-    
     State.retrieveBusy = false
     resumeFarm()
     return found
 end
 
--- ================ BREAK COUNTER (dari tile change) ================
-addHook(function(pkt)
-    if not State.running or State.retrieveBusy then return false end
-    if pkt.type == 5 or pkt.type == 6 then
-        -- Tile update, cek apakah block berubah jadi 0
-        -- Sederhana: cek inventory block bertambah
-        local blockInv = invCount(ITEMS.BLOCK_ID)
-        if blockInv > 0 then
-            -- Block ada di inventory, artinya PNB berhasil break
-            -- Tapi ini kurang akurat karena block bisa dari UT juga
-            -- Lebih aman pakai tile check
-        end
-    end
-end, "onGamePacket")
-
--- Alternatif: hitung dari inventory increase
 local lastBlockInv = 0
 
 function updateBreakCounter()
@@ -398,17 +344,11 @@ function updateBreakCounter()
     end
 end
 
--- ================ MAIN LOOP ================
 function mainLoop()
     while State.running do
         if not State.retrieveBusy and not State.farmingPaused then
-            -- Update break counter
             updateBreakCounter()
-            
-            -- Cek kondisi untuk retrieve
             local blockInv = invCount(ITEMS.BLOCK_ID)
-            
-            -- 1. UT retrieve (jika block inventory == 0)
             if Config.utEnabled and blockInv == 0 and not State.retrieveBusy then
                 LogToConsole("📊 Block inventory kosong, retrieve UT")
                 pauseFarm()
@@ -417,8 +357,6 @@ function mainLoop()
                 resumeFarm()
                 sleep(1000)
             end
-            
-            -- 2. Gaia retrieve (jika break threshold tercapai)
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
                 LogToConsole(string.format("📊 Break threshold tercapai (%d/%d)", State.breakCount, Config.breakThreshold))
                 pauseFarm()
@@ -433,24 +371,19 @@ function mainLoop()
     end
 end
 
--- ================ CONTROLS ================
 function startFarm()
     if State.running then return end
     if Config.onlyRetrieve then
         LogToConsole("🔁 Only Retrieve mode active")
     end
-    
     State.running = true
     State.retrieveBusy = false
     State.breakCount = 0
     lastBlockInv = invCount(ITEMS.BLOCK_ID)
-    
     savePosition()
-    
     if not Config.onlyRetrieve then
         setFarmState(true)
     end
-    
     runThread(mainLoop)
     LogToConsole("▶ Auto Farm Controller started")
     growtopia.notify("✅ Auto Farm started")
@@ -466,15 +399,6 @@ function stopFarm()
     updateStatus()
 end
 
-function onlyRetrieveMode()
-    Config.onlyRetrieve = not Config.onlyRetrieve
-    saved:set("only_retrieve", Config.onlyRetrieve)
-    saved:save()
-    LogToConsole("🔁 Only Retrieve: " .. (Config.onlyRetrieve and "ON" or "OFF"))
-    growtopia.notify("Only Retrieve: " .. (Config.onlyRetrieve and "ON" or "OFF"))
-end
-
--- ================ UPDATE STATUS ================
 function updateStatus()
     local items = {
         { State.running and "🟢 Running" or "🔴 Stopped" },
@@ -490,9 +414,7 @@ function updateStatus()
     editValue("status_display", json:encode(items))
 end
 
--- ================ UI ================
 local ui = UserInterface.new("Auto Farm Controller", "Agriculture")
-
 ui:addLabelApp("🌾 Auto Farm Controller v2.0", "Agriculture")
 ui:addTooltip(
     "ℹ️ Info",
@@ -504,7 +426,6 @@ ui:addTooltip(
     false
 )
 ui:addDivider()
-
 ui:addLabelApp("📊 Status", "Dashboard")
 ui:addDisplayList("", "[]", "status_display")
 ui:addDivider()
@@ -536,7 +457,6 @@ ui:addLabel("💡 Auto Farm bawaan akan ON/OFF otomatis")
 addCategory("Auto Farm Controller", "Agriculture")
 addIntoModule(ui:generateJSON(), "Auto Farm Controller")
 
--- ================ UI EVENT HANDLER ================
 addHook(function(type, name, value)
     if name == "break_threshold" then
         Config.breakThreshold = tonumber(value) or 500
@@ -586,7 +506,8 @@ addHook(function(type, name, value)
             startFarm()
         else
             if State.running then
-                            stopFarm()
+                stopFarm()
+            end
         end
         updateStatus()
     elseif name == "btn_stop" then
@@ -600,7 +521,6 @@ addHook(function(type, name, value)
     end
 end, "onValue")
 
--- ================ INITIAL ================
 runCoroutine(function()
     sleep(1000)
     updateStatus()
