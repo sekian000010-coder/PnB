@@ -1,4 +1,4 @@
--- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - FINAL FIX
+-- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - STABLE
 local pref = require("preferences")
 local json = require("json")
 local saved = pref:new("auto_farm_controller.json")
@@ -34,6 +34,10 @@ local ITEMS = {
 }
 
 local AUTOFARM_ALIAS = "autofarm_start"
+
+-- timer untuk countBlocks agar tidak terlalu sering
+local blockCountTimer = 0
+local cachedBlockCount = 0
 
 function getLocalPos()
     local p = getLocal()
@@ -135,14 +139,12 @@ function savePosition()
     State.startX, State.startY = getLocalPos()
 end
 
--- Fix: ensurePosition harus bener2 konfirmasi posisi sebelum return true
 function ensurePosition()
     for attempt = 1, 10 do
         local curWorld = GetWorldName()
         local cx, cy   = getLocalPos()
         if curWorld == State.startWorld and cx == State.startX and cy == State.startY then
-            sleep(500)  -- stabilisasi extra
-            -- Verify sekali lagi setelah sleep
+            sleep(300)
             cx, cy = getLocalPos()
             if cx == State.startX and cy == State.startY then
                 return true
@@ -152,7 +154,7 @@ function ensurePosition()
             sleep(1000)
         else
             if safeMove(State.startX, State.startY) then
-                sleep(500)  -- tunggu player bener2 settle
+                sleep(300)
                 local vx, vy = getLocalPos()
                 if vx == State.startX and vy == State.startY then
                     return true
@@ -184,15 +186,13 @@ end
 function pauseFarm()
     if not State.farmingPaused then
         setFarmState(false)
-        sleep(500)  -- tunggu farm bener2 berhenti
+        sleep(300)
     end
 end
 
--- Fix: resumeFarm hanya boleh dipanggil setelah posisi confirmed
 function resumeFarm()
     if not State.running or State.retrieveBusy then return end
     if not Config.onlyRetrieve then
-        -- Pastiin posisi bener dulu sebelum resume
         local cx, cy = getLocalPos()
         if cx == State.startX and cy == State.startY and
            string.lower(GetWorldName()) == string.lower(State.startWorld) then
@@ -202,15 +202,20 @@ function resumeFarm()
 end
 
 local lastBlockCount = 0
+local blockCheckTimer = 0
 
 function updateBreakCounter()
     if not State.running or State.retrieveBusy then return end
-    local now = countBlocks()
-    if now < lastBlockCount then
-        State.breakCount = State.breakCount + (lastBlockCount - now)
-        updateStatus()
+    blockCheckTimer = blockCheckTimer + 0.1
+    if blockCheckTimer >= 0.5 then
+        blockCheckTimer = 0
+        local now = countBlocks()
+        if now < lastBlockCount then
+            State.breakCount = State.breakCount + (lastBlockCount - now)
+            updateStatus()
+        end
+        lastBlockCount = now
     end
-    lastBlockCount = now
 end
 
 function checkSeedFull()
@@ -218,7 +223,6 @@ function checkSeedFull()
     if seedInv >= 200 and Config.gaiaEnabled then
         pauseFarm()
         dropItem(ITEMS.SEED_ID, seedInv, Config.gaiaDropX, Config.gaiaDropY)
-        -- Balik dulu sebelum resume
         if ensurePosition() then
             resumeFarm()
         end
@@ -264,7 +268,7 @@ function waitForDialog(timeout)
             dialogData.ready = false
             return true
         end
-        sleep(100)
+        sleep(50)
     end
     return false
 end
@@ -275,54 +279,62 @@ function retrieveGaia()
     State.retrieveBusy = true
     pauseFarm()
 
+    local success = false
     local found = false
-    local tiles = getTiles()
-    for _, t in pairs(tiles) do
-        if t and t.fg == ITEMS.GAIA_ID then
-            if safeMove(t.x, t.y - 1) then
-                local p = getLocal()
-                dialogData.ready = false
-                sendPacketRaw(false, {
-                    type  = 3,
-                    value = 32,
-                    px    = t.x,
-                    py    = t.y,
-                    x     = p.posX,
-                    y     = p.posY
-                })
-                if waitForDialog(3000) and dialogData.cfg then
-                    local stock = dialogData.stock
-                    if stock > 0 then
-                        local curInv = invCount(ITEMS.SEED_ID)
-                        local take   = math.min(stock, 200 - curInv)
-                        if take > 0 then
-                            local p1 = string.format(
-                                "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
-                                ITEMS.GAIA_DIALOG, dialogData.tilex, dialogData.tiley)
-                            sendPacket(2, p1)
-                            sleep(300)
-                            local p2 = string.format(
-                                "action|dialog_return\ndialog_name|itemremovedfromsucker\ntilex|%s|\ntiley|%s|\nitemtoremove|%d",
-                                dialogData.tilex, dialogData.tiley, take)
-                            sendPacket(2, p2)
-                            sleep(500)
-                            dropItem(ITEMS.SEED_ID, take, Config.gaiaDropX, Config.gaiaDropY)
+
+    local ok, err = pcall(function()
+        local tiles = getTiles()
+        for _, t in pairs(tiles) do
+            if t and t.fg == ITEMS.GAIA_ID then
+                if safeMove(t.x, t.y - 1) then
+                    local p = getLocal()
+                    dialogData.ready = false
+                    sendPacketRaw(false, {
+                        type  = 3,
+                        value = 32,
+                        px    = t.x,
+                        py    = t.y,
+                        x     = p.posX,
+                        y     = p.posY
+                    })
+                    if waitForDialog(3000) and dialogData.cfg then
+                        local stock = dialogData.stock
+                        if stock > 0 then
+                            local curInv = invCount(ITEMS.SEED_ID)
+                            local take   = math.min(stock, 200 - curInv)
+                            if take > 0 then
+                                local p1 = string.format(
+                                    "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
+                                    ITEMS.GAIA_DIALOG, dialogData.tilex, dialogData.tiley)
+                                sendPacket(2, p1)
+                                sleep(300)
+                                local p2 = string.format(
+                                    "action|dialog_return\ndialog_name|itemremovedfromsucker\ntilex|%s|\ntiley|%s|\nitemtoremove|%d",
+                                    dialogData.tilex, dialogData.tiley, take)
+                                sendPacket(2, p2)
+                                sleep(500)
+                                dropItem(ITEMS.SEED_ID, take, Config.gaiaDropX, Config.gaiaDropY)
+                            end
                         end
                     end
                 end
+                found = true
+                break
             end
-            found = true
-            break
         end
+        success = true
+    end)
+
+    if not ok then
+        LogToConsole("Retrieve GAIA error: " .. tostring(err))
     end
 
     State.retrieveBusy = false
 
-    -- Fix: ensurePosition dulu, baru resumeFarm
     if ensurePosition() then
         resumeFarm()
     else
-        growtopia.notify("Gagal balik posisi, farm tetap pause")
+        growtopia.notify("Gagal balik posisi, farm pause")
     end
 
     return found
@@ -335,53 +347,59 @@ function retrieveUT()
     pauseFarm()
 
     local found = false
-    local tiles = getTiles()
-    for _, t in pairs(tiles) do
-        if t and t.fg == ITEMS.UT_ID then
-            if safeMove(t.x, t.y - 1) then
-                local p = getLocal()
-                dialogData.ready = false
-                sendPacketRaw(false, {
-                    type  = 3,
-                    value = 32,
-                    px    = t.x,
-                    py    = t.y,
-                    x     = p.posX,
-                    y     = p.posY
-                })
-                if waitForDialog(3000) and dialogData.cfg then
-                    local stock = dialogData.stock
-                    if stock > 0 then
-                        local curInv = invCount(ITEMS.BLOCK_ID)
-                        local need   = 200 - curInv
-                        local take   = math.min(stock, need)
-                        if take > 0 then
-                            local p1 = string.format(
-                                "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
-                                ITEMS.UT_DIALOG, dialogData.tilex, dialogData.tiley)
-                            sendPacket(2, p1)
-                            sleep(300)
-                            local p2 = string.format(
-                                "action|dialog_return\ndialog_name|itemremovedfromsucker\ntilex|%s|\ntiley|%s|\nitemtoremove|%d",
-                                dialogData.tilex, dialogData.tiley, take)
-                            sendPacket(2, p2)
-                            sleep(500)
+
+    local ok, err = pcall(function()
+        local tiles = getTiles()
+        for _, t in pairs(tiles) do
+            if t and t.fg == ITEMS.UT_ID then
+                if safeMove(t.x, t.y - 1) then
+                    local p = getLocal()
+                    dialogData.ready = false
+                    sendPacketRaw(false, {
+                        type  = 3,
+                        value = 32,
+                        px    = t.x,
+                        py    = t.y,
+                        x     = p.posX,
+                        y     = p.posY
+                    })
+                    if waitForDialog(3000) and dialogData.cfg then
+                        local stock = dialogData.stock
+                        if stock > 0 then
+                            local curInv = invCount(ITEMS.BLOCK_ID)
+                            local need   = 200 - curInv
+                            local take   = math.min(stock, need)
+                            if take > 0 then
+                                local p1 = string.format(
+                                    "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
+                                    ITEMS.UT_DIALOG, dialogData.tilex, dialogData.tiley)
+                                sendPacket(2, p1)
+                                sleep(300)
+                                local p2 = string.format(
+                                    "action|dialog_return\ndialog_name|itemremovedfromsucker\ntilex|%s|\ntiley|%s|\nitemtoremove|%d",
+                                    dialogData.tilex, dialogData.tiley, take)
+                                sendPacket(2, p2)
+                                sleep(500)
+                            end
                         end
                     end
                 end
+                found = true
+                break
             end
-            found = true
-            break
         end
+    end)
+
+    if not ok then
+        LogToConsole("Retrieve UT error: " .. tostring(err))
     end
 
     State.retrieveBusy = false
 
-    -- Fix: ensurePosition dulu, baru resumeFarm
     if ensurePosition() then
         resumeFarm()
     else
-        growtopia.notify("Gagal balik posisi, farm tetap pause")
+        growtopia.notify("Gagal balik posisi, farm pause")
     end
 
     return found
@@ -396,13 +414,13 @@ function mainLoop()
             local blockInv = invCount(ITEMS.BLOCK_ID)
             if Config.utEnabled and blockInv == 0 and not State.retrieveBusy then
                 retrieveUT()
-                sleep(1000)
+                sleep(500)
             end
 
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
                 retrieveGaia()
                 State.breakCount = 0
-                sleep(1000)
+                sleep(500)
             end
         end
         sleep(100)
@@ -415,6 +433,7 @@ function startFarm()
     State.retrieveBusy = false
     State.breakCount   = 0
     lastBlockCount     = countBlocks()
+    blockCheckTimer    = 0
     savePosition()
     if not Config.onlyRetrieve then
         setFarmState(true)
