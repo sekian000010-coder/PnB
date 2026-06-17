@@ -1,3 +1,4 @@
+-- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - FIXED
 local pref = require("preferences")
 local json = require("json")
 local saved = pref:new("auto_farm_controller.json")
@@ -21,7 +22,6 @@ local State = {
     startWorld      = "",
     startX          = 0,
     startY          = 0,
-    lastSeedInv     = 0,
 }
 
 local ITEMS = {
@@ -46,6 +46,16 @@ function invCount(itemID)
         if v.id == itemID then return v.amount end
     end
     return 0
+end
+
+function countBlocks()
+    local n = 0
+    for _, t in pairs(getTiles()) do
+        if t and t.fg == ITEMS.BLOCK_ID then
+            n = n + 1
+        end
+    end
+    return n
 end
 
 function safeWarp(worldStr)
@@ -174,6 +184,32 @@ end
 function resumeFarm()
     if State.running and not State.retrieveBusy then
         setFarmState(true)
+    end
+end
+
+-- break counter via tile scan
+local lastBlockCount = 0
+
+function updateBreakCounter()
+    if not State.running or State.retrieveBusy then return end
+    local now = countBlocks()
+    if now < lastBlockCount then
+        local added = lastBlockCount - now
+        State.breakCount = State.breakCount + added
+        LogToConsole(string.format("Break +%d | Total: %d", added, State.breakCount))
+        updateStatus()
+    end
+    lastBlockCount = now
+end
+
+function checkSeedFull()
+    local seedInv = invCount(ITEMS.SEED_ID)
+    if seedInv >= 200 and Config.gaiaEnabled then
+        LogToConsole("Seed full, drop " .. seedInv)
+        pauseFarm()
+        dropItem(ITEMS.SEED_ID, seedInv, Config.gaiaDropX, Config.gaiaDropY)
+        resumeFarm()
+        sleep(500)
     end
 end
 
@@ -328,31 +364,6 @@ function retrieveUT()
     return found
 end
 
-function updateBreakCounter()
-    if not State.running or State.retrieveBusy then return end
-    local current = invCount(ITEMS.SEED_ID)
-    if current > State.lastSeedInv then
-        local added = current - State.lastSeedInv
-        State.breakCount = State.breakCount + added
-        LogToConsole(string.format("Break counter +%d = %d", added, State.breakCount))
-        State.lastSeedInv = current
-        updateStatus()
-    elseif current < State.lastSeedInv then
-        State.lastSeedInv = current
-    end
-end
-
-function checkSeedFull()
-    local seedInv = invCount(ITEMS.SEED_ID)
-    if seedInv >= 200 and Config.gaiaEnabled then
-        LogToConsole("Seed inventory full, drop " .. seedInv)
-        pauseFarm()
-        dropItem(ITEMS.SEED_ID, seedInv, Config.gaiaDropX, Config.gaiaDropY)
-        resumeFarm()
-        sleep(500)
-    end
-end
-
 function mainLoop()
     while State.running do
         if not State.retrieveBusy and not State.farmingPaused then
@@ -360,7 +371,7 @@ function mainLoop()
             updateBreakCounter()
             local blockInv = invCount(ITEMS.BLOCK_ID)
             if Config.utEnabled and blockInv == 0 and not State.retrieveBusy then
-                LogToConsole("Block inventory kosong, retrieve UT")
+                LogToConsole("Block inventory 0, retrieve UT")
                 pauseFarm()
                 retrieveUT()
                 ensurePosition()
@@ -368,7 +379,7 @@ function mainLoop()
                 sleep(1000)
             end
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
-                LogToConsole(string.format("Break threshold tercapai %d/%d", State.breakCount, Config.breakThreshold))
+                LogToConsole(string.format("Break threshold %d/%d", State.breakCount, Config.breakThreshold))
                 pauseFarm()
                 retrieveGaia()
                 State.breakCount = 0
@@ -386,7 +397,7 @@ function startFarm()
     State.running = true
     State.retrieveBusy = false
     State.breakCount = 0
-    State.lastSeedInv = invCount(ITEMS.SEED_ID)
+    lastBlockCount = countBlocks()
     savePosition()
     if not Config.onlyRetrieve then
         setFarmState(true)
@@ -423,12 +434,7 @@ end
 
 local ui = UserInterface.new("Auto Farm Controller", "Agriculture")
 ui:addLabelApp("Auto Farm Controller", "Agriculture")
-ui:addTooltip(
-    "Info",
-    "Control auto farm bawaan LGRID\nGaia retrieve saat break threshold\nUT retrieve saat block inventory 0\nPosition lock otomatis",
-    "Info",
-    false
-)
+ui:addTooltip("Info", "Break counter dari tile scan\nGaia retrieve saat threshold\nUT retrieve saat block 0", "Info", false)
 ui:addDivider()
 ui:addLabelApp("Status", "Dashboard")
 ui:addDisplayList("", "[]", "status_display")
@@ -503,18 +509,10 @@ addHook(function(type, name, value)
         saved:set("ut_drop_y", Config.utDropY)
         saved:save()
     elseif name == "toggle_start" then
-        if value then
-            startFarm()
-        else
-            if State.running then
-                stopFarm()
-            end
-        end
+        if value then startFarm() else if State.running then stopFarm() end end
         updateStatus()
     elseif name == "btn_stop" then
-        if State.running then
-            stopFarm()
-        end
+        if State.running then stopFarm() end
         updateStatus()
     elseif name == "btn_refresh" then
         updateStatus()
