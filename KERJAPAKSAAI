@@ -35,7 +35,6 @@ local ITEMS = {
 
 local AUTOFARM_ALIAS = "autofarm_start"
 
--- timer untuk countBlocks agar tidak terlalu sering
 local blockCountTimer = 0
 local cachedBlockCount = 0
 
@@ -273,33 +272,44 @@ function waitForDialog(timeout)
     return false
 end
 
+-- ============================================================
+-- FIX: RETRIEVE GAIA SAMPAI HABIS (LOOP SAMPAI EMPTY)
+-- ============================================================
 function retrieveGaia()
     if not Config.gaiaEnabled then return false end
     if State.retrieveBusy then return false end
     State.retrieveBusy = true
     pauseFarm()
 
-    local success = false
     local found = false
 
     local ok, err = pcall(function()
-        local tiles = getTiles()
-        for _, t in pairs(tiles) do
-            if t and t.fg == ITEMS.GAIA_ID then
-                if safeMove(t.x, t.y - 1) then
-                    local p = getLocal()
-                    dialogData.ready = false
-                    sendPacketRaw(false, {
-                        type  = 3,
-                        value = 32,
-                        px    = t.x,
-                        py    = t.y,
-                        x     = p.posX,
-                        y     = p.posY
-                    })
-                    if waitForDialog(3000) and dialogData.cfg then
-                        local stock = dialogData.stock
-                        if stock > 0 then
+        while true do
+            local tiles = getTiles()
+            local gaiaFound = false
+
+            for _, t in pairs(tiles) do
+                if t and t.fg == ITEMS.GAIA_ID then
+                    gaiaFound = true
+                    if safeMove(t.x, t.y - 1) then
+                        sleep(300)
+                        local p = getLocal()
+                        dialogData.ready = false
+                        sendPacketRaw(false, {
+                            type  = 3,
+                            value = 32,
+                            px    = t.x,
+                            py    = t.y,
+                            x     = p.posX,
+                            y     = p.posY
+                        })
+                        if waitForDialog(3000) and dialogData.cfg then
+                            local stock = dialogData.stock
+                            if stock <= 0 then
+                                growtopia.notify("GAIA empty, stop retrieve")
+                                gaiaFound = false
+                                break
+                            end
                             local curInv = invCount(ITEMS.SEED_ID)
                             local take   = math.min(stock, 200 - curInv)
                             if take > 0 then
@@ -314,19 +324,25 @@ function retrieveGaia()
                                 sendPacket(2, p2)
                                 sleep(500)
                                 dropItem(ITEMS.SEED_ID, take, Config.gaiaDropX, Config.gaiaDropY)
+                            else
+                                dropItem(ITEMS.SEED_ID, curInv, Config.gaiaDropX, Config.gaiaDropY)
                             end
                         end
                     end
+                    found = true
+                    break
                 end
-                found = true
+            end
+
+            if not gaiaFound then
                 break
             end
+            sleep(300)
         end
-        success = true
     end)
 
     if not ok then
-        LogToConsole("Retrieve GAIA error: " .. tostring(err))
+        growtopia.notify("Retrieve GAIA error: "..tostring(err))
     end
 
     State.retrieveBusy = false
@@ -339,6 +355,7 @@ function retrieveGaia()
 
     return found
 end
+-- ============================================================
 
 function retrieveUT()
     if not Config.utEnabled then return false end
