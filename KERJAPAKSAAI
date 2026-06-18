@@ -1,10 +1,10 @@
--- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - OPTIMIZED MEMORY
+-- AUTO FARM CONTROLLER (LGRID + GAIA + UT) - FIXED DROP + THRESHOLD
 local pref = require("preferences")
 local json = require("json")
 local saved = pref:new("auto_farm_controller.json")
 
 local Config = {
-    breakThreshold  = tonumber(saved:get("break_threshold", 500)),
+    breakThreshold  = tonumber(saved:get("break_threshold", 10)),
     gaiaEnabled     = saved:get("gaia_enabled", true),
     gaiaDropX       = tonumber(saved:get("gaia_drop_x", 0)),
     gaiaDropY       = tonumber(saved:get("gaia_drop_y", 0)),
@@ -55,7 +55,7 @@ local blockCacheTimer = 0
 
 function countBlocks()
     local now = getTime()
-    if now - blockCacheTimer < 2000 then
+    if now - blockCacheTimer < 500 then
         return cachedBlockCount
     end
     blockCacheTimer = now
@@ -107,35 +107,29 @@ function safeMove(x, y)
     return false
 end
 
--- FIX: findDropTile now checks base tile first, then only x-1 if base is full
+-- FIX: findDropTile dari Claude (cari tile kosong dari baseX ke kiri)
 function findDropTile(baseX, baseY)
+    if baseX < 0 then baseX = 0 end
+    if baseY < 0 then baseY = 0 end
     local objList = getObjectList()
-    -- Helper to check if tile is empty
     local function isTileEmpty(x, y)
+        if x < 0 or y < 0 then return false end
         local t = tile.getTile(x, y)
-        if not t or t.fg ~= 0 then
-            return false
-        end
+        if not t or t.fg ~= 0 then return false end
         for _, obj in pairs(objList) do
-            if (obj.pos.x // 32) == x and (obj.pos.y // 32) == y then
+            if obj.pos.x // 32 == x and obj.pos.y // 32 == y then
                 return false
             end
         end
         return true
     end
-
-    -- Check base tile first
-    if isTileEmpty(baseX, baseY) then
-        return baseX, baseY
+    for offset = 0, 20 do
+        local tx = baseX - offset
+        if tx < 0 then break end
+        if isTileEmpty(tx, baseY) then
+            return tx, baseY
+        end
     end
-
-    -- If base tile is full, try one tile to the left (x-1)
-    local leftX = baseX - 1
-    if leftX >= 0 and isTileEmpty(leftX, baseY) then
-        return leftX, baseY
-    end
-
-    -- Fallback: return current position (or base if nothing else)
     local cx, cy = getLocalPos()
     return cx, cy
 end
@@ -244,7 +238,8 @@ function updateBreakCounter()
     if not State.running or State.retrieveBusy then return end
     local now = countBlocks()
     if now < lastBlockCount then
-        State.breakCount = State.breakCount + (lastBlockCount - now)
+        local added = lastBlockCount - now
+        State.breakCount = State.breakCount + added
         updateStatus(false)
     end
     lastBlockCount = now
@@ -305,9 +300,11 @@ function waitForDialog(timeout)
     return false
 end
 
+-- FIX: retrieveGaia dari Claude (dengan guard State.running)
 function retrieveGaia()
     if not Config.gaiaEnabled then return false end
     if State.retrieveBusy then return false end
+    if not State.running then return false end
     State.retrieveBusy = true
     pauseFarm()
 
@@ -324,7 +321,9 @@ function retrieveGaia()
     if not gaiaX or not gaiaY then
         growtopia.notify("GAIA not found")
         State.retrieveBusy = false
-        resumeFarm()
+        if State.running then
+            if ensurePosition() then resumeFarm() end
+        end
         return false
     end
 
@@ -334,7 +333,7 @@ function retrieveGaia()
             return
         end
 
-        while true do
+        while State.running do
             local p = getLocal()
             dialogData.ready = false
             sendPacketRaw(false, {
@@ -345,16 +344,17 @@ function retrieveGaia()
                 x     = p.posX,
                 y     = p.posY
             })
-            if not waitForDialog(3000) or not dialogData.cfg then
-                break
-            end
+            if not waitForDialog(3000) or not dialogData.cfg then break end
+
             local stock = dialogData.stock
             if stock <= 0 then
                 growtopia.notify("GAIA empty")
                 break
             end
+
             local curInv = invCount(ITEMS.SEED_ID)
-            local take = math.min(stock, 200 - curInv)
+            local take   = math.min(stock, 200 - curInv)
+
             if take > 0 then
                 local p1 = string.format(
                     "action|dialog_return\ndialog_name|%s\ntilex|%s|\ntiley|%s|\nbuttonClicked|retrieveitem\n\nchk_enablesucking|1",
@@ -367,12 +367,18 @@ function retrieveGaia()
                 sendPacket(2, p2)
                 sleep(500)
                 dropItem(ITEMS.SEED_ID, take, Config.gaiaDropX, Config.gaiaDropY)
-                safeMove(gaiaX, gaiaY - 1)
+                if State.running then
+                    safeMove(gaiaX, gaiaY - 1)
+                    sleep(300)
+                end
             else
                 dropItem(ITEMS.SEED_ID, curInv, Config.gaiaDropX, Config.gaiaDropY)
-                safeMove(gaiaX, gaiaY - 1)
-                sleep(300)
+                if State.running then
+                    safeMove(gaiaX, gaiaY - 1)
+                    sleep(300)
+                end
             end
+
             found = true
             sleep(300)
         end
@@ -383,7 +389,15 @@ function retrieveGaia()
     end
 
     State.retrieveBusy = false
-    if ensurePosition() then resumeFarm() else growtopia.notify("Failed return, paused") end
+
+    if State.running then
+        if ensurePosition() then
+            resumeFarm()
+        else
+            growtopia.notify("Failed return, paused")
+        end
+    end
+
     return found
 end
 
@@ -456,6 +470,7 @@ function mainLoop()
             end
 
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
+                growtopia.notify("Threshold reached! Starting retrieve...")
                 retrieveGaia()
                 State.breakCount = 0
                 sleep(500)
@@ -488,10 +503,9 @@ function stopFarm()
     updateStatus(true)
 end
 
--- UI
 local ui = UserInterface.new("Auto Farm Controller", "Agriculture")
 ui:addLabelApp("Auto Farm Controller", "Agriculture")
-ui:addTooltip("Info", "Optimized memory version", "Info", false)
+ui:addTooltip("Info", "Optimized memory version - Fixed drop + threshold", "Info", false)
 ui:addDivider()
 ui:addLabelApp("Status", "Dashboard")
 ui:addDisplayList("", "[]", "status_display")
@@ -516,6 +530,7 @@ ui:addLabelApp("Control", "PlayArrow")
 ui:addToggleButton("Start", false, "toggle_start")
 ui:addButton("Stop", "btn_stop")
 ui:addButton("Refresh Status", "btn_refresh")
+ui:addButton("Check Status", "btn_check_status")
 ui:addDivider()
 
 addCategory("Auto Farm Controller", "Agriculture")
@@ -568,6 +583,21 @@ addHook(function(type, name, value)
     elseif name == "btn_refresh" then
         updateStatus(true)
         growtopia.notify("Status refreshed")
+    elseif name == "btn_check_status" then
+        local blockInv = invCount(ITEMS.BLOCK_ID)
+        local seedInv = invCount(ITEMS.SEED_ID)
+        local farmState = getFarmState()
+        local msg = string.format(
+            "Break: %d/%d | Block: %d | Seed: %d | Farm: %s | GAIA: %s | UT: %s",
+            State.breakCount,
+            Config.breakThreshold,
+            blockInv,
+            seedInv,
+            farmState and "ON" or "OFF",
+            Config.gaiaEnabled and "ON" or "OFF",
+            Config.utEnabled and "ON" or "OFF"
+        )
+        growtopia.notify(msg)
     end
 end, "onValue")
 
