@@ -37,7 +37,6 @@ local AUTOFARM_ALIAS = "autofarm_start"
 
 local lastUIUpdate = 0
 
--- UTILITY FUNCTIONS
 function getLocalPos()
     local p = getLocal()
     if not p then return 0, 0 end
@@ -51,7 +50,6 @@ function invCount(itemID)
     return 0
 end
 
--- OPTIMIZED: countBlocks dengan cache + throttle
 local cachedBlockCount = 0
 local blockCacheTimer = 0
 
@@ -109,27 +107,37 @@ function safeMove(x, y)
     return false
 end
 
--- OPTIMIZED: objectList di-cache per drop
+-- FIX: findDropTile now checks base tile first, then only x-1 if base is full
 function findDropTile(baseX, baseY)
     local objList = getObjectList()
-    for offset = 0, 20 do
-        local tx = baseX - offset
-        if tx < 0 then break end
-        local t = getTile(tx, baseY)
-        if t and t.fg == 0 then
-            local hasObject = false
-            for _, obj in pairs(objList) do
-                if (obj.pos.x // 32) == tx and (obj.pos.y // 32) == baseY then
-                    hasObject = true
-                    break
-                end
-            end
-            if not hasObject then
-                return tx, baseY
+    -- Helper to check if tile is empty
+    local function isTileEmpty(x, y)
+        local t = tile.getTile(x, y)
+        if not t or t.fg ~= 0 then
+            return false
+        end
+        for _, obj in pairs(objList) do
+            if (obj.pos.x // 32) == x and (obj.pos.y // 32) == y then
+                return false
             end
         end
+        return true
     end
-    return getLocalPos()
+
+    -- Check base tile first
+    if isTileEmpty(baseX, baseY) then
+        return baseX, baseY
+    end
+
+    -- If base tile is full, try one tile to the left (x-1)
+    local leftX = baseX - 1
+    if leftX >= 0 and isTileEmpty(leftX, baseY) then
+        return leftX, baseY
+    end
+
+    -- Fallback: return current position (or base if nothing else)
+    local cx, cy = getLocalPos()
+    return cx, cy
 end
 
 function dropItem(itemID, amount, baseX, baseY)
@@ -297,7 +305,6 @@ function waitForDialog(timeout)
     return false
 end
 
--- OPTIMIZED: Gaia posisi dicari sekali, tidak scan ulang di loop
 function retrieveGaia()
     if not Config.gaiaEnabled then return false end
     if State.retrieveBusy then return false end
@@ -307,7 +314,6 @@ function retrieveGaia()
     local found = false
     local gaiaX, gaiaY = nil, nil
 
-    -- Cari posisi Gaia sekali saja
     for _, t in pairs(getTiles()) do
         if t and t.fg == ITEMS.GAIA_ID then
             gaiaX, gaiaY = t.x, t.y
