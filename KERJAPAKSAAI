@@ -1,5 +1,9 @@
 -- ============================================================
--- AUTO FARM CONTROLLER (PNB) - FINAL FLOW (OBJECT COLLECTOR)
+-- AUTO FARM CONTROLLER (PNB) – TRIGGER‑BASED DROP (FINAL)
+-- ============================================================
+-- dropWithShift sekarang MURNI menunggu trigger "You can't drop that here"
+-- untuk memutuskan apakah tile penuh.
+-- Tidak ada lagi max tile loop, digantikan oleh trigger + FindPath X-1.
 -- ============================================================
 local pref = require("preferences")
 local json = require("json")
@@ -40,8 +44,6 @@ local ITEMS = {
 }
 
 local AUTOFARM_ALIAS = "autofarm_start"
-local AUTOFIND_ALIAS = "autofarm_autopick_enable"
-local lastAutoFindToggle = 0
 local lastUIUpdate = 0
 
 -- ============================================================
@@ -50,16 +52,13 @@ local lastUIUpdate = 0
 local farmArea = { minX = 0, maxX = 0, y = 0 }
 local farmTileState = {}
 
-function resetFarmArea()
-    farmTileState = {}
-end
+function resetFarmArea() farmTileState = {} end
 
 function initFarmArea()
     if not State.running then return end
     farmArea.minX = State.startX - Config.xCoords
     farmArea.maxX = State.startX + Config.xCoords
     farmArea.y = State.startY + Config.yCoords
-
     for x = farmArea.minX, farmArea.maxX do
         local t = getTile(x, farmArea.y)
         farmTileState[x] = (t and t.fg == ITEMS.BLOCK_ID)
@@ -70,12 +69,12 @@ function updateBreakCounter()
     if not State.running or State.retrieveBusy or State.breakCount >= Config.breakThreshold then return end
     for x = farmArea.minX, farmArea.maxX do
         local t = getTile(x, farmArea.y)
-        local nowHasBlock = (t and t.fg == ITEMS.BLOCK_ID)
-        if farmTileState[x] and not nowHasBlock then
+        local has = (t and t.fg == ITEMS.BLOCK_ID)
+        if farmTileState[x] and not has then
             State.breakCount = State.breakCount + 1
             updateStatus(false)
         end
-        farmTileState[x] = nowHasBlock
+        farmTileState[x] = has
     end
 end
 
@@ -132,31 +131,75 @@ function safeMove(x, y)
     return false
 end
 
+-- ============================================================
+-- TRIGGER TILE PENUH (GLOBAL) + AUTO GESER KIRI
+-- ============================================================
+local tileFullTriggered = false
+
+addHook(function(var)
+    local v1 = var.v1 or ""
+    local v2 = var.v2 or ""
+    if v1 == "OnTextOverlay" or v1 == "OnConsoleMessage" then
+        if v2:find("You can't drop that here") then
+            tileFullTriggered = true
+            local p = getLocal()
+            if p then
+                local curX = math.floor(p.posX / 32)
+                local curY = math.floor(p.posY / 32)
+                local targetX = curX - 1
+                if targetX >= 0 then
+                    FindPath(targetX, curY)
+                    sleep(300)
+                end
+            end
+        end
+    end
+    return false
+end, "onVariant")
+
+-- ============================================================
+-- DROP DENGAN TRIGGER SAJA (TIDAK ADA MAX TILE)
+-- ============================================================
 function dropWithShift(itemID, amount, baseX, baseY)
     if amount <= 0 then return false end
     local curX = baseX
-    for _ = 1, 50 do
-        if curX < 0 then return false end
+    while curX >= 0 do
         if not safeMove(curX, baseY) then return false end
         local before = invCount(itemID)
         if before < amount then return false end
+
+        tileFullTriggered = false   -- reset flag sebelum drop
+
         sendPacket(2, "action|drop\nitemID|"..itemID)
         sleep(500)
         sendPacket(2, "action|dialog_return\ndialog_name|drop_item\nitemID|"..itemID.."|\ncount|"..amount)
         sleep(300)
+
+        -- Cek inventory setelah drop
         local after = before
         for _ = 1, 20 do
             sleep(100)
             after = invCount(itemID)
             if after < before then break end
         end
+
         if after < before then
+            -- Inventory benar‑benar berkurang → sukses
             State.currentDropX = curX
             return true
-        else
-            curX = curX - 1
         end
+
+        -- Inventory belum berkurang → tunggu trigger tile penuh
+        local waitStart = getTime()
+        while getTime() - waitStart < 2000 do
+            if tileFullTriggered then break end
+            sleep(100)
+        end
+
+        -- Geser ke kiri (entah karena trigger atau timeout)
+        curX = curX - 1
     end
+    LogToConsole("[PNB] Gagal drop – tidak ada tile tersedia")
     return false
 end
 
@@ -175,7 +218,7 @@ function dropAllSeed()
 end
 
 -- ============================================================
--- DIALOG TERPISAH
+-- DIALOG TERPISAH (GAIA & UT)
 -- ============================================================
 local gaiaDialogData = { stock = 0, tilex = 0, tiley = 0, ready = false }
 local utDialogData   = { stock = 0, tilex = 0, tiley = 0, ready = false }
@@ -225,7 +268,7 @@ function waitForUTDialog(timeout)
 end
 
 -- ============================================================
--- RETRIEVE UT (TANPA RESUME AUTOFARM)
+-- RETRIEVE UT & GAIA (TANPA RESUME AUTOFARM)
 -- ============================================================
 function retrieveUT()
     if not Config.utEnabled or State.retrieveBusy or not State.running then return "UT_NOT_FOUND" end
@@ -326,24 +369,18 @@ function retrieveGaia()
 end
 
 -- ============================================================
--- OBJECT COLLECTOR (Pengganti AutoFind)
+-- OBJECT COLLECTOR
 -- ============================================================
 local function collectBlockFromGround()
     local objects = getObjectList()
     if not objects or #objects == 0 then return false end
-
     local targets = {}
     for _, obj in ipairs(objects) do
         if obj.itemid == ITEMS.BLOCK_ID and obj.amount > 0 then
-            table.insert(targets, {
-                x = obj.pos.x // 32,
-                y = obj.pos.y // 32,
-            })
+            table.insert(targets, { x = obj.pos.x // 32, y = obj.pos.y // 32 })
         end
     end
-
     if #targets == 0 then return false end
-
     local before = invCount(ITEMS.BLOCK_ID)
     for _, target in ipairs(targets) do
         if safeMove(target.x, target.y) then
@@ -449,7 +486,7 @@ function checkSeedFull()
 end
 
 -- ============================================================
--- MAIN LOOP (PUSAT KONTROL)
+-- MAIN LOOP
 -- ============================================================
 function mainLoop()
     while State.running do
@@ -459,13 +496,11 @@ function mainLoop()
 
             local blockInv = invCount(ITEMS.BLOCK_ID)
 
-            -- ========== UT HANDLER + OBJECT COLLECTOR ==========
             if blockInv == 0 and Config.utEnabled and not State.retrieveBusy then
                 local utStatus = retrieveUT()
                 sleep(500)
                 blockInv = invCount(ITEMS.BLOCK_ID)
 
-                -- Jika UT kosong, langsung cari block di ground (tanpa balik dulu)
                 if (utStatus == "UT_EMPTY" or utStatus == "UT_NOT_FOUND") and blockInv == 0 then
                     if Config.enableObjectCollector then
                         LogToConsole("UT kosong, mencari block di ground...")
@@ -475,17 +510,14 @@ function mainLoop()
                     end
                 end
 
-                -- Kalau masih < 200, coba ambil lagi dari ground
                 if blockInv > 0 and blockInv < 200 and Config.enableObjectCollector then
                     collectBlockFromGround()
                     sleep(300)
                 end
 
-                -- Baru kembali ke posisi awal
                 returnToFarm()
             end
 
-            -- ========== GAIA HANDLER ==========
             if Config.gaiaEnabled and State.breakCount >= Config.breakThreshold and not State.retrieveBusy then
                 growtopia.notify("Threshold reached! Retrieve GAIA...")
                 retrieveGaia()
@@ -609,10 +641,13 @@ addHook(function(type, name, value)
     end
 end, "onValue")
 
+-- ============================================================
+-- INISIALISASI
+-- ============================================================
 runCoroutine(function()
     sleep(1000)
     updateStatus(true)
 end)
 
-growtopia.notify("Auto Farm Controller ready (Object Collector)")
+growtopia.notify("Auto Farm Controller ready (Trigger‑Only Drop)")
 applyHook()
