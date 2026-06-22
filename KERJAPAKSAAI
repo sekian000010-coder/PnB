@@ -1,5 +1,5 @@
 -- ============================================================
--- AUTO FARM CONTROLLER (PNB) - FINAL FLOW (TIDAK ADA RESUME PREMATUR)
+-- AUTO FARM CONTROLLER (PNB) - FINAL FLOW (OBJECT COLLECTOR)
 -- ============================================================
 local pref = require("preferences")
 local json = require("json")
@@ -16,7 +16,7 @@ local Config = {
     utDropX = tonumber(saved:get("ut_drop_x", 0)),
     utDropY = tonumber(saved:get("ut_drop_y", 0)),
     onlyRetrieve = saved:get("only_retrieve", false),
-    enableAutoFindBackup = saved:get("enable_autofind_backup", false),
+    enableObjectCollector = saved:get("enable_object_collector", true),
 }
 
 local State = {
@@ -225,7 +225,7 @@ function waitForUTDialog(timeout)
 end
 
 -- ============================================================
--- RETRIEVE (TANPA RESUME AUTOFARM)
+-- RETRIEVE UT (TANPA RESUME AUTOFARM)
 -- ============================================================
 function retrieveUT()
     if not Config.utEnabled or State.retrieveBusy or not State.running then return "UT_NOT_FOUND" end
@@ -326,6 +326,39 @@ function retrieveGaia()
 end
 
 -- ============================================================
+-- OBJECT COLLECTOR (Pengganti AutoFind)
+-- ============================================================
+local function collectBlockFromGround()
+    local objects = getObjectList()
+    if not objects or #objects == 0 then return false end
+
+    local targets = {}
+    for _, obj in ipairs(objects) do
+        if obj.itemid == ITEMS.BLOCK_ID and obj.amount > 0 then
+            table.insert(targets, {
+                x = obj.pos.x // 32,
+                y = obj.pos.y // 32,
+            })
+        end
+    end
+
+    if #targets == 0 then return false end
+
+    local before = invCount(ITEMS.BLOCK_ID)
+    for _, target in ipairs(targets) do
+        if safeMove(target.x, target.y) then
+            sleep(800)
+            local after = invCount(ITEMS.BLOCK_ID)
+            if after > before then
+                LogToConsole("Object Collector: ambil " .. (after - before) .. " block")
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- ============================================================
 -- KONTROL POSISI & FARM
 -- ============================================================
 function savePosition()
@@ -386,22 +419,6 @@ function pauseFarm()
     if not State.farmingPaused then setFarmState(false) sleep(300) end
 end
 
-function getAutoFind()
-    local ok, val = pcall(getValue, 0, AUTOFIND_ALIAS)
-    return ok and val or false
-end
-
-function setAutoFind(on)
-    local now = getTime()
-    if now - lastAutoFindToggle < 1000 then return end
-    lastAutoFindToggle = now
-    if getAutoFind() ~= on then
-        editValue(AUTOFIND_ALIAS, on)
-        sleep(200)
-        updateStatus()
-    end
-end
-
 function updateStatus(forceUpdate)
     local now = getTime()
     if not forceUpdate and (now - lastUIUpdate) < 1000 then return end
@@ -415,7 +432,6 @@ function updateStatus(forceUpdate)
         {"GAIA: "..(Config.gaiaEnabled and "ON" or "OFF")},
         {"UT: "..(Config.utEnabled and "ON" or "OFF")},
         {"Autofarm: "..(getFarmState() and "ON" or "OFF")},
-        {"AutoFind: "..(getAutoFind() and "ON" or "OFF")},
         {"Pos: "..State.startWorld.." "..State.startX..","..State.startY}
     }
     pcall(editValue, "status_display", json:encode(items))
@@ -443,27 +459,30 @@ function mainLoop()
 
             local blockInv = invCount(ITEMS.BLOCK_ID)
 
-            -- ========== UT HANDLER ==========
+            -- ========== UT HANDLER + OBJECT COLLECTOR ==========
             if blockInv == 0 and Config.utEnabled and not State.retrieveBusy then
                 local utStatus = retrieveUT()
                 sleep(500)
                 blockInv = invCount(ITEMS.BLOCK_ID)
 
-                -- Kembali ke tile break dulu
-                returnToFarm()
-
-                -- Jika UT kosong & inventori tetap 0 -> AutoFind ON
+                -- Jika UT kosong, langsung cari block di ground (tanpa balik dulu)
                 if (utStatus == "UT_EMPTY" or utStatus == "UT_NOT_FOUND") and blockInv == 0 then
-                    if Config.enableAutoFindBackup and not getAutoFind() then
-                        setAutoFind(true)
-                        growtopia.notify("Auto Find ON (UT empty)")
+                    if Config.enableObjectCollector then
+                        LogToConsole("UT kosong, mencari block di ground...")
+                        collectBlockFromGround()
+                        sleep(300)
+                        blockInv = invCount(ITEMS.BLOCK_ID)
                     end
                 end
-            end
 
-            -- Matikan AutoFind jika blok sudah ada
-            if blockInv > 0 and getAutoFind() then
-                setAutoFind(false)
+                -- Kalau masih < 200, coba ambil lagi dari ground
+                if blockInv > 0 and blockInv < 200 and Config.enableObjectCollector then
+                    collectBlockFromGround()
+                    sleep(300)
+                end
+
+                -- Baru kembali ke posisi awal
+                returnToFarm()
             end
 
             -- ========== GAIA HANDLER ==========
@@ -472,7 +491,7 @@ function mainLoop()
                 retrieveGaia()
                 State.breakCount = 0
                 sleep(500)
-                returnToFarm()   -- balik ke tile break & lanjut farm
+                returnToFarm()
             end
         end
         sleep(200)
@@ -500,7 +519,6 @@ function stopFarm()
     State.running = false
     State.retrieveBusy = false
     setFarmState(false)
-    if getAutoFind() then setAutoFind(false) end
     resetFarmArea()
     growtopia.notify("Auto Farm stopped")
     updateStatus(true)
@@ -511,7 +529,7 @@ end
 -- ============================================================
 local ui = UserInterface.new("Auto Farm Controller", "Agriculture")
 ui:addLabelApp("Auto Farm Controller", "Agriculture")
-ui:addTooltip("Info", "Final flow: UT/Gaia retrieve tanpa resume prematur", "Info", false)
+ui:addTooltip("Info", "PNB + GAIA + UT + Object Collector", "Info", false)
 ui:addDivider()
 ui:addLabelApp("Status", "Dashboard")
 ui:addDisplayList("", "[]", "status_display")
@@ -519,10 +537,8 @@ ui:addDivider()
 
 local pnbGroup = ui:addExpandableToggle("PNB Settings", true, "pnb_group", false, true)
 ui:addChildInputInt(pnbGroup.list_child, "Break Threshold", tostring(Config.breakThreshold), "", "", "Numbers", "break_threshold")
-ui:addChildInputInt(pnbGroup.list_child, "X Range (±)", tostring(Config.xCoords), "", "", "ArrowForward", "x_coords")
-ui:addChildInputInt(pnbGroup.list_child, "Y Offset", tostring(Config.yCoords), "", "", "ArrowUpward", "y_coords")
 ui:addChildToggle(pnbGroup.list_child, "Only Retrieve Mode", Config.onlyRetrieve, "only_retrieve", true)
-ui:addChildToggle(pnbGroup.list_child, "Enable Auto Find Backup", Config.enableAutoFindBackup, "enable_autofind_backup", true)
+ui:addChildToggle(pnbGroup.list_child, "Enable Object Collector", Config.enableObjectCollector, "enable_object_collector", true)
 
 local gaiaGroup = ui:addExpandableToggle("GAIA", true, "gaia_group", false, true)
 ui:addChildToggle(gaiaGroup.list_child, "Enable GAIA", Config.gaiaEnabled, "gaia_enable", true)
@@ -552,18 +568,14 @@ addHook(function(type, name, value)
     if name == "break_threshold" then
         Config.breakThreshold = tonumber(value) or 10
         saved:set("break_threshold", Config.breakThreshold) saved:save() updateStatus(true)
-    elseif name == "x_coords" then
-        Config.xCoords = tonumber(value) or 2 saved:set("x_coords", Config.xCoords) saved:save()
-    elseif name == "y_coords" then
-        Config.yCoords = tonumber(value) or -1 saved:set("y_coords", Config.yCoords) saved:save()
     elseif name == "only_retrieve" then
         Config.onlyRetrieve = value saved:set("only_retrieve", value) saved:save()
         if State.running then
             if value then setFarmState(false) else setFarmState(true) end
         end
         updateStatus(true)
-    elseif name == "enable_autofind_backup" then
-        Config.enableAutoFindBackup = value saved:set("enable_autofind_backup", value) saved:save() updateStatus(true)
+    elseif name == "enable_object_collector" then
+        Config.enableObjectCollector = value saved:set("enable_object_collector", value) saved:save() updateStatus(true)
     elseif name == "gaia_enable" then
         Config.gaiaEnabled = value saved:set("gaia_enabled", value) saved:save() updateStatus(true)
     elseif name == "gaia_dropx" then
@@ -586,14 +598,12 @@ addHook(function(type, name, value)
         local blockInv = invCount(ITEMS.BLOCK_ID)
         local seedInv = invCount(ITEMS.SEED_ID)
         local farmState = getFarmState()
-        local findState = getAutoFind()
         local msg = string.format(
-            "Break: %d/%d | Block: %d | Seed: %d | Farm: %s | GAIA: %s | UT: %s | Find: %s",
+            "Break: %d/%d | Block: %d | Seed: %d | Farm: %s | GAIA: %s | UT: %s",
             State.breakCount, Config.breakThreshold, blockInv, seedInv,
             farmState and "ON" or "OFF",
             Config.gaiaEnabled and "ON" or "OFF",
-            Config.utEnabled and "ON" or "OFF",
-            findState and "ON" or "OFF"
+            Config.utEnabled and "ON" or "OFF"
         )
         growtopia.notify(msg)
     end
@@ -604,4 +614,5 @@ runCoroutine(function()
     updateStatus(true)
 end)
 
-growtopia.notify("Auto Farm Controller ready (final flow)")
+growtopia.notify("Auto Farm Controller ready (Object Collector)")
+applyHook()
